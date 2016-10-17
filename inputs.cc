@@ -6,36 +6,147 @@
 #include "common.h"
 #include "main.hh"
 
-void readLIDAR(FILE *fd, int hoffset, int voffset, int h, int w, int indx,
-	       double n, double e, double s, double west)
+
+int loadClutter(char *filename, double radius, struct site tx)
 {
-	int x = 0, y = 0, reads = 0;
+	/* This function reads a MODIS 17-class clutter file in ASCII Grid format.
+	   The nominal heights it applies to each value, eg. 5 (Mixed forest) = 15m are 
+	   taken from ITU-R P.452-11.
+	   It doesn't have it's own matrix, instead it boosts the DEM matrix like point clutter
+	   AddElevation(lat, lon, height);
+ 	   If tiles are standard 2880 x 3840 then cellsize is constant at 0.004166
+	 */
+	int x, y, z, result, h, w;
+	double clh, xll, yll, xur, yur, cellsize, cellsize2, xOffset, yOffset, lat, lon, i, j;
+	char line[50000];
+	char * pch;
+	FILE *fd;
+
+	fd = fopen(filename, "rb");
+
+	if (fd != NULL) {
+
+		if (fgets(line, 19, fd) != NULL) {
+			pch = strtok (line," ");
+			pch = strtok (NULL, " ");
+			w = atoi(pch);
+		}
+
+		if (fgets(line, 19, fd) != NULL) {
+			//pch = strtok (line," ");
+			//pch = strtok (NULL, " ");
+			h = atoi(pch);
+		}
+
+		if(w==2880 && h==3840){
+			cellsize=0.004167;
+			cellsize2 = cellsize * 2;
+		}else{
+			return 0; // can't work with this yet
+		}
+			if (debug) {
+				fprintf(stdout, "\nLoading clutter file \"%s\" %d x %d...\n", filename, w,h);
+				fflush(stdout);
+			}
+		if (fgets(line, 25, fd) != NULL) {
+			sscanf(pch, "%lf", &xll);
+		}
+
+		fgets(line, 25, fd);
+		if (fgets(line, 25, fd) != NULL) {
+			sscanf(pch, "%lf", &yll);
+		}
+
+		if (debug) {
+			fprintf(stdout, "\nxll %.2f yll %.2f\n", xll, yll);
+			fflush(stdout);
+		}
+
+		fgets(line, 25, fd); // cellsize
+
+		//loop over matrix
+		for (y = h; y > 0; y--) {
+				x = 0;
+				if (fgets(line, 100000, fd) != NULL) {
+					pch = strtok(line, " ");
+					while (pch != NULL && x < w) {
+						z = atoi(pch);
+						
+						// Apply ITU-R P.452-11
+						// Treat classes 0, 9, 10, 11, 15, 16 as water, (Water, savanna, grassland, wetland, snow, barren)
+						clh = 0.0;
+
+						// evergreen, evergreen, urban
+						if(z == 1 || z == 2 || z == 13)
+							clh = 20.0;
+						// deciduous, deciduous, mixed
+						if(z==3 || z==4 || z==5)
+							clh = 15.0;
+						// woody shrublands & savannas
+						if(z==6 || z==8)
+							clh = 4.0;
+						// shurblands, savannas, croplands...
+						if(z==7 || z==9 || z==10 || z==12 || z==14)
+							clh = 2.0;
+
+						if(clh>1){
+							xOffset=x*cellsize; // 12 deg wide
+							yOffset=y*cellsize; // 16 deg high
+
+							// make all longitudes positive 
+							if(xll+xOffset>0){
+								lon=360-(xll+xOffset);
+							}else{
+								lon=(xll+xOffset)*-1;
+							}
+							lat = yll+yOffset;
+
+							// bounding box
+							if(lat > tx.lat - radius && lat < tx.lat + radius && lon > tx.lon - radius && lon < tx.lon + radius){
+								
+								// not in near field
+								if((lat > tx.lat+cellsize2 || lat < tx.lat-cellsize2) || (lon > tx.lon + cellsize2 || lon < tx.lon - cellsize2)){
+									AddElevation(lat,lon,clh,3);
+
+								}
+
+							}
+						}
+	
+						x++;
+						pch = strtok(NULL, " ");
+					}//while
+				} else {
+					fprintf(stdout, "Clutter error @ x %d y %d\n", x, y);
+				}//if
+			}//for
+	}
+	fclose(fd);
+	return 0;
+}
+
+void readLIDAR(FILE *fd, int h, int w, int indx,double n, double e, double s, double west)
+{
+	int x = 0, y = 0, reads = 0, a=0, b=0, avg=0, tWidth = 0, tHeight = 0;
 	char line[150000];
 	char *pch;
-
-	// use offsets to determine middle lat/lon for 5 x 10k tiles
-	// TALL
-	if (voffset == 0 && h == 10000) {
-		s = (s+n)/2;
-		h = 5000;
-	}
-	if (voffset == 5000 && h == 10000) {
-		n = (s+n)/2;
-	}
-	// WIDE
-	if (hoffset == 0 && w == 10000) {
-		e = (e+west)/2;
-		w = 5000;
-	}
-	if (hoffset == 5000 && w == 10000) {
-		west = (e+west)/2;
-		w = 5000;
-	}
 
 	dem[indx].max_north=n;
 	dem[indx].min_west=e;
 	dem[indx].min_north=s;
 	dem[indx].max_west=west;
+
+	if (max_north == -90)
+		max_north = dem[indx].max_north;
+
+	else if (dem[indx].max_north > max_north)
+		max_north = dem[indx].max_north;
+
+	if (min_north == 90)
+		min_north = dem[indx].min_north;
+
+	else if (dem[indx].min_north < min_north)
+		min_north = dem[indx].min_north;
 
 	if (dem[indx].max_west > max_west)
 		max_west = dem[indx].max_west;
@@ -68,18 +179,12 @@ void readLIDAR(FILE *fd, int hoffset, int voffset, int h, int w, int indx,
 
 	for (y = h-1; y > -1; y--) {
 		x = w-1;
+	
 		if (fgets(line, 150000, fd) != NULL) {
-			// do nothing until n rows have passed
-			if (y < voffset || voffset == 0) {
-				pch = strtok(line, " ");
-
-				//dummy reads until we reach offset
-				// for 5000 offset, width must be 10e3
-				for (n = 0; n < hoffset; n++)
-					pch = strtok(NULL, " ");
+				pch = strtok(line, " "); // split line into values
 
 				while (pch != NULL && x > -1) {
-					if (atoi(pch) < -999)
+					if (atoi(pch) <= -9999)
 						pch = "0";
 					dem[indx].data[y][x] = atoi(pch);
 					dem[indx].signal[x][y] = 0;
@@ -92,46 +197,32 @@ void readLIDAR(FILE *fd, int hoffset, int voffset, int h, int w, int indx,
 						dem[indx].min_el = atoi(pch);
 						min_elevation = dem[indx].min_el;
 					}
-					x--;
+
+   					x--;
 					pch = strtok(NULL, " ");
 				}//while
-			}//voffset
+
+
 		} else {
 			fprintf(stdout, "LIDAR error @ x %d y %d indx %d\n",
 					x, y, indx);
 		}//if
 	}//for
+
 }
 
 int loadLIDAR(char *filenames)
 {
-	/*
-	 * This function reads either 9 LIDAR tiles of n rows and n columns
-	 * in ASCII grid format OR a single super tile composed of 2 or more
-	 * tiles. The tile must have WGS84 bounds in the header in the order:
-	 * WEST,SOUTH,EAST,NORTH
-	 *	ncols        5000
-	 *	nrows        5000
-	 *	xllcorner    -2.291359
-	 *	yllcorner    51.788295
-	 *	xurcorner    -2.146674
-	 *	yurcorner    51.878474
-	 *	cellsize     2
-	 *	NODATA_value  -9999
-	 *
-	 *	Tiles must be entered in the format
-	 *
-	 *	    -lid tile1.asc,tile2.asc,tile3.asc
-	 */
 	char *filename;
-	char *files[4]; // 4 tiles
+	char *files[100]; // 10x10 tiles
 	int x, y, indx = 0, fc = 0, hoffset = 0, voffset = 0, pos,
 	    dem_alloced = 0;
-	double xll, yll, xur, yur, cellsize;
+	double xll, yll, xur, yur, cellsize, avgCellsize;
 	char found, free_page = 0, jline[20], lid_file[255],	
 	     path_plus_name[255], *junk = NULL;
-	char line[50000];
+	char line[100000];
 	char * pch;
+    	double TO_DEG = (180 / PI);
 	FILE *fd;
 
 	// test for multiple files
@@ -147,85 +238,78 @@ int loadLIDAR(char *filenames)
 
 		if (fd != NULL) {
 
-			if (fgets(line, 19, fd) != NULL) {
+			if (fgets(line, 255, fd) != NULL) {
 				pch = strtok (line," ");
 				pch = strtok (NULL, " ");
-				width = atoi(pch);
+				width = atoi(pch); // ncols
 
 				if (debug) {
 					fprintf(stdout, "Loading \"%s\" into page %d with width %d...\n", files[indx], indx, width);
 					fflush(stdout);
 				}
 
+                        if (fgets(line, 255, fd) != NULL)
+                                height = atoi(pch); // nrows
+
 				if (!dem_alloced) {
-					IPPD = width;
+					//Reduce MAXPAGES to increase speed
+					MAXPAGES=fc;
+					if(width>height){
+						IPPD = width;
+					}else{
+						IPPD = height;
+					}
+					// add fudge as reprojected tiles sometimes vary by a pixel or two
+					IPPD+=5;
 					ARRAYSIZE = (MAXPAGES * IPPD) + 10;
 					do_allocs();
 					dem_alloced = 1;
 				}
 
 			}
-			if (fgets(line, 19, fd) != NULL)
-				height = atoi(pch);
-			fgets(line, 24, fd);
-
-			if (fgets(line, 24, fd) != NULL) {
-				//xll=atof(pch);
-				sscanf(pch, "%lf", &xll);
-			}
-			fgets(line, 24, fd);
-			if (fgets(line, 24, fd) != NULL) {
-				//yll=atof(pch);
-				sscanf(pch, "%lf", &yll);
+			if (fgets(line, 255, fd) != NULL) {
+				sscanf(pch, "%lf", &xll); // xll
 			}
 
-			fgets(line, 24, fd);
-
-			if (fgets(line, 24, fd) != NULL) {
-				//xur=atof(pch);
-				sscanf(pch, "%lf", &xur);
+			if (fgets(line, 255, fd) != NULL) {
+				sscanf(pch, "%lf", &yll); // yll
 			}
 
-			fgets(line, 24, fd);
+			if (fgets(line, 255, fd) != NULL)
+				sscanf(pch, "%lf", &cellsize); 
 
-			if (fgets(line, 24, fd) != NULL) {
-				//yur=atof(pch);
-				sscanf(pch, "%lf", &yur);
-			}
+			avgCellsize=avgCellsize+cellsize;
 
-			fgets(line, 15, fd);
+			/*if(cellsize>=0.5){ // 50cm LIDAR?
+				// compute xur and yur with inverse haversine if cellsize in *metres*
+				double roundDistance = (width*cellsize)/6371000;
+				yur = asin(sin(yll*DEG2RAD) * cos(roundDistance) + cos(yll * DEG2RAD) * sin(roundDistance) * cos(0)) * TO_DEG;
+				xur = ((xll*DEG2RAD) + atan2(sin(90*DEG2RAD) * sin(roundDistance) * cos(yll*DEG2RAD), cos(roundDistance) - sin(yll * DEG2RAD) * sin(yur*DEG2RAD))) * TO_DEG;
+			}else{*/
+				// Degrees with GDAL option: -co "FORCE_CELLSIZE=YES"
+				xur = xll+(cellsize*width);
+				yur = yll+(cellsize*height);
+			//}
 
-			if (fgets(line, 15, fd) != NULL)
-				cellsize = strtod(pch, NULL);
-
-			// LIDAR 10m @ 10800 PPD
-			if (cellsize == 10.0)
-				MAXRAD = 30;
-			// LIDAR 2m @ 54000 PPD
-			if (cellsize == 2.0)
-				MAXRAD = 15;
-			// LIDAR 1m @ 108000 PPD!
-			if (cellsize == 1.0)
-				MAXRAD = 10;
-
-			if (xur < eastoffset)
+			if (xur > eastoffset)
 				eastoffset = xur;
-			if (xll > westoffset)
+			if (xll < westoffset)
 				westoffset = xll;
 
 			if (debug)
-				fprintf(stdout, "PRE yll %.7f yur %.7f xur %.7f xll %.7f delta %.6f\n", yll, yur, xur, xll, delta);
+				fprintf(stdout,"%d, %d, %.7f, %.7f, %.7f, %.7f, %.7f\n",width,height,xll,yll,cellsize,yur,xur);
+
 
 			// Greenwich straddling hack
-			if (xll < 0 && xur > 0) {
+			if (xll <= 0 && xur > 0) {
 				xll = (xur - xll); // full width
 				xur = 0.0; // budge it along so it's west of greenwich
 				delta = eastoffset; // add to Tx longitude later
 			} else {
 				// Transform WGS84 longitudes into 'west' values as society finishes east of Greenwich ;)
-				if (xll > 0)
+				if (xll >= 0)
 					xll = 360-xll;
-				if(xur > 0)
+				if(xur >= 0)
 					xur = 360-xur;
 				if(xll < 0)
 					xll = xll * -1;
@@ -235,58 +319,16 @@ int loadLIDAR(char *filenames)
 			if (debug)
 				fprintf(stdout, "POST yll %.7f yur %.7f xur %.7f xll %.7f delta %.6f\n", yll, yur, xur, xll, delta);
 
-			if (yll < min_north)
-				min_north = yll;
-			if (yur > max_north)		
-				max_north = yur;
 
-			fgets(line, 30, fd); // NODATA
+			fgets(line, 255, fd); // NODATA
 			pos = ftell(fd);
 
 			// tile 0 [x| ]
 			if (debug)
-				fprintf(stdout, "readLIDAR(fd,%d,%d,%d,%d,%d,%.4f,%.4f,%.4f,%.4f)\n", 0, 0, height, width, indx, yur, xur, yll, xll);
+				fprintf(stdout, "readLIDAR(fd,%d,%d,%d,%.4f,%.4f,%.4f,%.4f)\n", height, width, indx, yur, xur, yll, xll);
 
-			readLIDAR(fd, 0, 0, height, width, indx, yur, xur, yll,	xll);
-			//rewind
-			fseek(fd, pos, SEEK_SET);
+			readLIDAR(fd, height, width, indx, yur, xur, yll, xll);
 
-			// tile 1 [ |x]
-			if (width == 2000 ||
-			    width == 10000 ||
-			    width == 10082) {
-				indx++;
-				if (debug)
-					fprintf(stdout, "readLIDAR(fd,%d,%d,%d,%d,%d,%.4f,%.4f,%.4f,%.4f)\n", width / 2, 0, height, width, indx, yur, xur, yll, xll);
-
-				readLIDAR(fd, width / 2, 0, height, width, indx, yur, xur, yll, xll);
-			}
-			//rewind
-			fseek(fd, pos, SEEK_SET);
-
-			// tile 2 [x | ]
-			if (height == 2000 ||
-			    height == 10000 ||
-			    height == 10082) {
-				indx++;
-				if (debug)
-					fprintf(stdout, "readLIDAR(fd,%d,%d,%d,%d,%d,%.4f,%.4f,%.4f,%.4f)\n", 0, height / 2, height, width, indx, yur, xur, yll, xll);
-
-				readLIDAR(fd, 0, height / 2, height, width, indx, yur, xur, yll, xll);
-			}
-			//rewind
-			fseek(fd, pos, SEEK_SET);
-
-			// tile 3 [ |x]
-			if ((width == 2000 && height == 2000) ||
-			    (width == 10000 && height == 10000) ||
-			    (width == 10082 && height == 10082)) {
-				indx++;
-				if (debug)
-					fprintf(stdout, "readLIDAR(fd,%d,%d,%d,%d,%d,%.4f,%.4f,%.4f,%.4f)\n", width / 2, height / 2, height, width, indx, yur, xur, yll, xll);
-
-				readLIDAR(fd, width / 2, height / 2, height, width, indx, yur, xur, yll, xll);
-			}
 			fclose(fd);
 			if (debug)
 				fprintf(stdout, "LIDAR LOADED %d x %d\n", width, height);
@@ -295,7 +337,13 @@ int loadLIDAR(char *filenames)
 		}
 		indx++;
 	} // filename(s)
+	IPPD=width;
+	ippd=IPPD;
+	height = (unsigned)((max_north-min_north) / cellsize);
+	width = (unsigned)((max_west-min_west) / cellsize);
 
+	if (debug)
+		fprintf(stdout, "fc %d WIDTH %d HEIGHT %d ippd %d minN %.5f maxN %.5f minW %.5f maxW %.5f avgCellsize %.5f\n", fc, width, height, ippd,min_north,max_north,min_west,max_west,avgCellsize);
 	return 0;
 }
 
@@ -1632,7 +1680,7 @@ void LoadUDT(char *filename)
 				/* No duplicate found */
 				//fprintf(stdout,"%lf, %lf \n",xpix*dpp, ypix*dpp);
 				fflush(stdout);
-			    AddElevation(xpix * dpp, ypix * dpp, height);
+			    AddElevation(xpix * dpp, ypix * dpp, height, 1);
 			fflush(stdout);
 
 			n = fscanf(fd1, "%d, %d, %lf", &xpix, &ypix, &height);
